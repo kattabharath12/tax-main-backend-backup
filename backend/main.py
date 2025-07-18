@@ -133,9 +133,8 @@ def root():
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://tax-main-frontend-backup-production.up.railway.app",
-        "https://taxbox-ai-enhanced-backend-1-production-2bcd.up.railway.app",
-        "https://taxbox-ai-enhanced-frontend-1-production.up.railway.app",
+        "https://tax-main-frontend-backup-production.up.railway.app",  # Your frontend
+        "https://tax-main-backend-backup-production.up.railway.app",   # Your backend   
         "http://localhost:3000",
         "http://127.0.0.1:3000"
     ],
