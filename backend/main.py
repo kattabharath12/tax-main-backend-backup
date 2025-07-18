@@ -133,7 +133,7 @@ def root():
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://humorous-vibrancy-production-e3ba.up.railway.app",
+        "https://tax-main-frontend-backup-production.up.railway.app",
         "https://taxbox-ai-enhanced-backend-1-production-2bcd.up.railway.app",
         "https://taxbox-ai-enhanced-frontend-1-production.up.railway.app",
         "http://localhost:3000",
