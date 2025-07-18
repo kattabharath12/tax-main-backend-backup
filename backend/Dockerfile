@@ -22,11 +22,23 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Create uploads directory
-RUN mkdir -p uploads
+# Create uploads directory with proper permissions
+RUN mkdir -p uploads && chmod 755 uploads
 
-# Expose port (Railway will set the PORT environment variable)
+# Create a non-root user for security
+RUN useradd --create-home --shell /bin/bash app
+RUN chown -R app:app /app
+USER app
+
+# Railway sets PORT automatically, but provide fallback
+ENV PORT=8000
+
+# Expose the port
 EXPOSE $PORT
 
-# Run the application - Use Railway's PORT environment variable
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:$PORT/health || exit 1
+
+# Run the application
+CMD uvicorn main:app --host 0.0.0.0 --port $PORT
