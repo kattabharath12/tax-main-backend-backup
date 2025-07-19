@@ -109,25 +109,26 @@ class W2Extractor:
             # Employer name line - after EIN line, contains address
             if 'employer' in line_lower and 'name' in line_lower and i+1 < len(lines):
                 employer_line = lines[i+1]
-                # Clean up the employer name (remove trailing numbers that are SS amounts)
-                employer_parts = employer_line.split()
-                # Keep only the name/address part, remove trailing numbers
-                name_parts = []
-                for part in employer_parts:
-                    if part.isdigit() and len(part) <= 3:  # Skip small numbers (likely SS amounts)
-                        break
-                    name_parts.append(part)
-                if name_parts:
-                    extracted['employer_name'] = ' '.join(name_parts)
-                    logger.info(f"✅ Found employer name: {extracted['employer_name']} (line {i+2})")
-                
-                # Extract SS wages and tax from the numbers at the end
+                # Extract SS wages and tax from the numbers at the end first
                 numbers = re.findall(r'\b(\d{1,4})\b', employer_line)
                 if len(numbers) >= 2:
                     extracted['social_security_wages'] = float(numbers[-2])
                     extracted['social_security_tax_withheld'] = float(numbers[-1])
                     logger.info(f"✅ Found SS wages (Box 3): ${float(numbers[-2]):,.2f} (line {i+2})")
                     logger.info(f"✅ Found SS tax (Box 4): ${float(numbers[-1]):,.2f} (line {i+2})")
+                    
+                    # Remove the SS numbers from the end to get clean employer name
+                    clean_line = employer_line
+                    for num in numbers[-2:]:  # Remove last 2 numbers
+                        clean_line = clean_line.replace(num, '', 1)
+                    
+                    # Clean up the employer name
+                    extracted['employer_name'] = clean_line.strip().rstrip(',').strip()
+                    logger.info(f"✅ Found employer name: {extracted['employer_name']} (line {i+2})")
+                else:
+                    # No numbers found, use the whole line
+                    extracted['employer_name'] = employer_line.strip()
+                    logger.info(f"✅ Found employer name: {extracted['employer_name']} (line {i+2})")
             
             # Medicare line - Line like "500 540"
             if re.match(r'^\d{3,4}\s+\d{3,4}$', line):
@@ -159,6 +160,15 @@ class W2Extractor:
             if years:
                 extracted['tax_year'] = max(years)
                 logger.info(f"✅ Found tax year: {extracted['tax_year']}")
+        
+        # Extract employee address if available
+        for i, line in enumerate(lines):
+            if 'employee' in line.lower() and 'address' in line.lower() and i+1 < len(lines):
+                addr_line = lines[i+1]
+                # Look for address pattern (numbers, street, apt, zip)
+                if re.search(r'\d+.*(?:ST|AVENUE|AVE|STREET|ROAD|RD).*\d{5}', addr_line, re.IGNORECASE):
+                    extracted['employee_address'] = addr_line.strip()
+                    logger.info(f"✅ Found employee address: {extracted['employee_address']} (line {i+2})")
         
         # Fallback for missing fields using general patterns
         if 'employee_ssn' not in extracted:
