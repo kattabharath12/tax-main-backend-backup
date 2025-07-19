@@ -17,3 +17,7 @@ python-magic==0.4.27
 aiofiles==23.2.0
 PyJWT==2.8.0
 psycopg2-binary==2.9.9
+
+# Additional dependencies for better OCR
+scikit-image==0.21.0
+matplotlib==3.7.2
