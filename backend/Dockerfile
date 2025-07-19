@@ -1,18 +1,26 @@
 FROM python:3.11-slim
 
-# Install system dependencies for OCR
+# Install system dependencies for OCR and image processing
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-eng \
+    tesseract-ocr-osd \
+    libtesseract-dev \
     libgl1-mesa-glx \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
     libxrender-dev \
     libgomp1 \
+    libfontconfig1 \
+    libxrender1 \
     poppler-utils \
     curl \
+    wget \
     && rm -rf /var/lib/apt/lists/*
+
+# Set Tesseract environment variables
+ENV TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata/
 
 WORKDIR /app
 
