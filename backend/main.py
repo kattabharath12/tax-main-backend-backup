@@ -13,9 +13,10 @@ import os
 import shutil
 import aiofiles
 from pathlib import Path
+import logging
 
 from database import SessionLocal, engine, Base
-from models import User, Document, TaxReturn, Payment, W2Form  # Import models FIRST
+from models import User, Document, TaxReturn, Payment, W2Form
 from schemas import (
     UserCreate, UserResponse, DocumentResponse, TaxReturnCreate, 
     TaxReturnResponse, PaymentCreate, PaymentResponse, W2FormResponse,
@@ -23,70 +24,37 @@ from schemas import (
 )
 from services.w2_extractor import W2Extractor
 
-# DEFINITIVE database initialization
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Database initialization
 print("Initializing database...")
 
 def init_database():
-    """Initialize database with explicit table creation"""
+    """Initialize database with proper error handling"""
     try:
-        # Test basic connectivity
         print("Testing database connection...")
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
             print("✅ Database connection established")
         
-        # Drop and recreate all tables to ensure clean state
-        print("Dropping existing tables (if any)...")
-        try:
-            Base.metadata.drop_all(bind=engine)
-            print("✅ Tables dropped successfully")
-        except Exception as e:
-            print(f"⚠️ Drop tables warning (may be normal): {e}")
+        print("Creating database tables...")
+        Base.metadata.create_all(bind=engine)
         
-        print("Creating fresh database tables...")
-        
-        # Create tables with explicit transaction control
-        with engine.begin() as conn:
-            Base.metadata.create_all(bind=conn)
-            print("✅ Tables created in transaction")
-        
-        # Verify tables exist with fresh connections
+        # Verify tables exist
         print("Verifying table creation...")
-        
-        # Test each table individually with fresh sessions
         table_names = ['users', 'documents', 'tax_returns', 'payments', 'w2_forms']
         
-        for table_name in table_names:
-            try:
-                with engine.connect() as conn:
-                    result = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}"))
+        with SessionLocal() as db:
+            for table_name in table_names:
+                try:
+                    result = db.execute(text(f"SELECT COUNT(*) FROM {table_name}"))
                     count = result.scalar()
                     print(f"✅ {table_name} table verified (count: {count})")
-            except Exception as e:
-                print(f"❌ {table_name} table issue: {e}")
-                # Try to create individual table
-                try:
-                    print(f"Attempting to create {table_name} table individually...")
-                    if table_name == 'users':
-                        User.__table__.create(engine, checkfirst=True)
-                    elif table_name == 'documents':
-                        Document.__table__.create(engine, checkfirst=True)
-                    elif table_name == 'tax_returns':
-                        TaxReturn.__table__.create(engine, checkfirst=True)
-                    elif table_name == 'payments':
-                        Payment.__table__.create(engine, checkfirst=True)
-                    elif table_name == 'w2_forms':
-                        W2Form.__table__.create(engine, checkfirst=True)
-                    print(f"✅ {table_name} table created individually")
-                except Exception as create_error:
-                    print(f"❌ Failed to create {table_name}: {create_error}")
-        
-        # Final verification
-        print("Final verification...")
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"))
-            actual_tables = [row[0] for row in result.fetchall()]
-            print(f"✅ Actually created tables: {actual_tables}")
+                except Exception as e:
+                    print(f"❌ {table_name} table issue: {e}")
+                    raise e
         
         print("✅ Database initialization completed successfully")
         return True
@@ -96,13 +64,14 @@ def init_database():
         import traceback
         traceback.print_exc()
         return False
+
 # Initialize the database
 db_success = init_database()
 if not db_success:
     print("⚠️ Starting app with database issues - some features may not work")
+
 app = FastAPI(title="TaxBox.AI API", version="2.0.0")
 
-# SIMPLIFIED startup event - just for logging, since we already created tables
 @app.on_event("startup")
 async def startup_event():
     """Log startup information"""
@@ -111,11 +80,12 @@ async def startup_event():
         db_type = "PostgreSQL" if "postgresql" in db_url else "SQLite"
         print(f"🚀 TaxBox.AI API started successfully using {db_type}")
         
-        # Verify tables exist
-        with SessionLocal() as db:
-            result = db.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"))
-            tables = [row[0] for row in result.fetchall()]
-            print(f"📊 Available tables: {tables}")
+        # Verify W2 extractor
+        try:
+            extractor = W2Extractor()
+            print("✅ W2 Extractor initialized successfully")
+        except Exception as e:
+            print(f"❌ W2 Extractor initialization failed: {e}")
             
     except Exception as e:
         print(f"❌ Startup verification error: {e}")
@@ -129,12 +99,12 @@ def root():
         "health": "/health"
     }
 
-# CORS middleware - FIXED VERSION
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://tax-main-frontend-backup-production.up.railway.app",  # Your frontend
-        "https://tax-main-backend-backup-production.up.railway.app",   # Your backend   
+        "https://tax-main-frontend-backup-production.up.railway.app",
+        "https://taxbox-ai-enhanced-backend-1-production-2bcd.up.railway.app",
         "http://localhost:3000",
         "http://127.0.0.1:3000"
     ],
@@ -205,18 +175,24 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         raise credentials_exception
     return user
 
-# Background task for W2 processing
-async def process_w2_extraction(document_id: int, file_path: str, db: Session):
-    """Background task to process W2 extraction"""
+# Enhanced background task for W2 processing
+async def process_w2_extraction(document_id: int, file_path: str):
+    """Background task to process W2 extraction with better error handling"""
+    db = SessionLocal()
     try:
         # Update document status
         document = db.query(Document).filter(Document.id == document_id).first()
-        if document:
-            document.extraction_status = "processing"
-            db.commit()
+        if not document:
+            logger.error(f"Document {document_id} not found")
+            return
+
+        document.extraction_status = "processing"
+        db.commit()
+        logger.info(f"Starting W2 processing for document {document_id}")
 
         # Process the document
         result = w2_extractor.process_document(file_path)
+        logger.info(f"W2 processing result for document {document_id}: {result}")
 
         if result['is_w2'] and not result.get('error'):
             # Create W2 form record
@@ -224,29 +200,44 @@ async def process_w2_extraction(document_id: int, file_path: str, db: Session):
                 user_id=document.user_id,
                 document_id=document_id,
                 raw_extracted_data=result,
-                confidence_score=result['confidence'],
-                **result['extracted_fields']
+                confidence_score=result.get('confidence', 0.0),
+                **{k: v for k, v in result['extracted_fields'].items() 
+                   if k in ['employer_name', 'employer_address', 'employer_ein', 
+                           'employee_ssn', 'employee_name', 'employee_address',
+                           'wages_tips_compensation', 'federal_income_tax_withheld',
+                           'social_security_wages', 'social_security_tax_withheld',
+                           'medicare_wages', 'medicare_tax_withheld', 'social_security_tips',
+                           'allocated_tips', 'dependent_care_benefits', 'nonqualified_plans',
+                           'state_wages', 'state_income_tax', 'local_wages', 
+                           'local_income_tax', 'tax_year']}
             )
             db.add(w2_data)
             document.extraction_status = "completed"
             document.processed = True
+            logger.info(f"W2 data saved successfully for document {document_id}")
         else:
             document.extraction_status = "no_w2_detected" if not result['is_w2'] else "failed"
+            logger.info(f"W2 processing completed with status: {document.extraction_status}")
 
         db.commit()
 
     except Exception as e:
+        logger.error(f"Error processing W2 extraction for document {document_id}: {e}")
         # Update document status to failed
-        document = db.query(Document).filter(Document.id == document_id).first()
-        if document:
-            document.extraction_status = "failed"
-            db.commit()
+        try:
+            document = db.query(Document).filter(Document.id == document_id).first()
+            if document:
+                document.extraction_status = "failed"
+                db.commit()
+        except Exception as db_error:
+            logger.error(f"Error updating document status: {db_error}")
+    finally:
+        db.close()
 
 # Routes
 @app.post("/register", response_model=UserResponse)
 def register(user: UserCreate, db: Session = Depends(get_db)):
-    # Add debug logging
-    print(f"Registration attempt for: {user.email}")
+    logger.info(f"Registration attempt for: {user.email}")
     
     db_user = db.query(User).filter(User.email == user.email).first()
     if db_user:
@@ -262,7 +253,7 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(db_user)
     
-    print(f"✅ User registered successfully: {user.email}")
+    logger.info(f"✅ User registered successfully: {user.email}")
     return db_user
 
 @app.post("/token")
@@ -298,6 +289,11 @@ async def upload_document(
     if file_ext not in allowed_extensions:
         raise HTTPException(status_code=400, detail="Unsupported file type")
 
+    # Validate file size (10MB limit)
+    file_content = await file.read()
+    if len(file_content) > 10 * 1024 * 1024:  # 10MB
+        raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+
     # Create unique filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{current_user.id}_{timestamp}_{file.filename}"
@@ -305,8 +301,7 @@ async def upload_document(
 
     # Save file
     async with aiofiles.open(file_path, 'wb') as f:
-        content = await file.read()
-        await f.write(content)
+        await f.write(file_content)
 
     # Create document record
     document = Document(
@@ -321,7 +316,8 @@ async def upload_document(
     db.refresh(document)
 
     # Add background task for W2 processing
-    background_tasks.add_task(process_w2_extraction, document.id, str(file_path), db)
+    background_tasks.add_task(process_w2_extraction, document.id, str(file_path))
+    logger.info(f"Document uploaded and W2 processing queued for document {document.id}")
 
     return document
 
@@ -471,6 +467,51 @@ def database_health_check():
             "error": str(e),
             "timestamp": datetime.utcnow()
         }
+
+# Test endpoint for W2 extraction
+@app.post("/test-w2-extraction")
+async def test_w2_extraction(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
+    """Test endpoint to check W2 extraction without saving to database"""
+    try:
+        # Validate file type
+        allowed_extensions = {'.pdf', '.jpg', '.jpeg', '.png', '.tiff', '.bmp'}
+        file_ext = Path(file.filename).suffix.lower()
+
+        if file_ext not in allowed_extensions:
+            raise HTTPException(status_code=400, detail="Unsupported file type")
+
+        # Save temporary file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        temp_filename = f"test_{timestamp}_{file.filename}"
+        temp_path = UPLOAD_DIR / temp_filename
+
+        content = await file.read()
+        async with aiofiles.open(temp_path, 'wb') as f:
+            await f.write(content)
+
+        # Process with W2 extractor
+        result = w2_extractor.process_document(str(temp_path))
+
+        # Clean up temp file
+        if temp_path.exists():
+            temp_path.unlink()
+
+        return {
+            "success": True,
+            "result": result,
+            "message": "W2 extraction test completed"
+        }
+
+    except Exception as e:
+        logger.error(f"Error in test W2 extraction: {e}")
+        # Clean up temp file if it exists
+        if 'temp_path' in locals() and temp_path.exists():
+            temp_path.unlink()
+        
+        raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
