@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class W2Extractor:
     def __init__(self):
-        # Standard W2 box mapping for reference
+        # W2 box structure mapping
         self.w2_boxes = {
             'a': 'employee_ssn',
             'b': 'employer_ein', 
@@ -30,7 +30,6 @@ class W2Extractor:
             '6': 'medicare_tax_withheld',
             '7': 'social_security_tips',
             '8': 'allocated_tips',
-            '9': '',  # Verification code
             '10': 'dependent_care_benefits',
             '11': 'nonqualified_plans',
             '12': 'codes',
@@ -90,292 +89,203 @@ class W2Extractor:
             logger.error(f"OCR error: {e}")
             return "", 0.0
 
-    def extract_all_numbers_and_text(self, text: str) -> Dict[str, List]:
-        """Extract all numbers and text chunks for analysis"""
+    def parse_w2_structured_text(self, text: str) -> Dict[str, Any]:
+        """Parse W2 text using structured box patterns"""
+        extracted = {}
         lines = [line.strip() for line in text.split('\n') if line.strip()]
         
-        all_numbers = []
-        all_text_chunks = []
+        logger.info("=== PARSING W2 STRUCTURED TEXT ===")
+        logger.info(f"Total lines: {len(lines)}")
         
-        for i, line in enumerate(lines):
-            # Find all numbers in this line - improved pattern for currency
-            numbers = re.findall(r'\b(\d{1,3}(?:,\d{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)\b', line)
-            for num in numbers:
-                # Clean and validate number
-                clean_num = num.replace(',', '')
-                if len(clean_num) >= 2 and clean_num.replace('.', '').isdigit():
-                    all_numbers.append((clean_num, i, line))
-            
-            # Find text chunks (potential names) - improved pattern
-            text_chunks = re.findall(r'\b([A-Z][A-Za-z]{1,}(?:\s+[A-Z][A-Za-z]{1,})*)\b', line)
-            for chunk in text_chunks:
-                if len(chunk) >= 2:
-                    all_text_chunks.append((chunk, i, line))
+        # Print first 20 lines for debugging
+        for i, line in enumerate(lines[:20]):
+            logger.info(f"Line {i+1}: {line}")
         
-        return {
-            'numbers': all_numbers,
-            'text_chunks': all_text_chunks,
-            'lines': lines
-        }
-
-    def is_ssn_format(self, text: str) -> bool:
-        """Check if text matches SSN format"""
-        # Remove any separators
-        clean = re.sub(r'[-\s]', '', text)
-        if len(clean) == 9 and clean.isdigit():
-            # Avoid common test/placeholder SSNs
-            invalid_ssns = ['123456789', '000000000', '111111111', '222222222']
-            return clean not in invalid_ssns
-        return False
-
-    def is_ein_format(self, text: str) -> bool:
-        """Check if text matches EIN format"""
-        # EIN can be XX-XXXXXXX or similar patterns
-        if re.match(r'^[A-Z0-9]{2,5}[-]?\d{7,10}$', text) or re.match(r'^\d{2}-\d{7}$', text):
-            invalid_eins = ['12-3456789', 'XX-XXXXXXX']
-            return text not in invalid_eins
-        return False
-
-    def extract_ssn(self, text: str) -> Optional[str]:
-        """Extract SSN with improved logic"""
-        # Look for formatted SSNs first
+        # Look for specific W2 patterns in sequence
+        
+        # 1. Find SSN (box a) - look for patterns near employee info
         ssn_patterns = [
-            r'\b(\d{3}-\d{2}-\d{4})\b',
-            r'\b(\d{3}\s\d{2}\s\d{4})\b',
-            r'\b(\d{9})\b'
+            r'a\s+Employee\'?s\s+social\s+security\s+number[^\d]*(\d{9}|\d{3}[-\s]\d{2}[-\s]\d{4})',
+            r'VOID.*?(\d{9}|\d{3}[-\s]\d{2}[-\s]\d{4})',
+            r'(\d{9}|\d{3}[-\s]\d{2}[-\s]\d{4})',  # Any 9-digit number or formatted SSN
         ]
         
         for pattern in ssn_patterns:
-            matches = re.findall(pattern, text)
+            matches = re.findall(pattern, text, re.IGNORECASE)
             for match in matches:
-                if self.is_ssn_format(match):
-                    # Format consistently
-                    clean = re.sub(r'[-\s]', '', match)
-                    return f"{clean[:3]}-{clean[3:5]}-{clean[5:]}"
+                clean_ssn = re.sub(r'[-\s]', '', match)
+                if len(clean_ssn) == 9 and clean_ssn.isdigit() and clean_ssn not in ['123456789', '000000000']:
+                    extracted['employee_ssn'] = f"{clean_ssn[:3]}-{clean_ssn[3:5]}-{clean_ssn[5:]}"
+                    logger.info(f"✅ Found SSN: {extracted['employee_ssn']}")
+                    break
+            if 'employee_ssn' in extracted:
+                break
         
-        return None
-
-    def extract_ein(self, text: str) -> Optional[str]:
-        """Extract EIN with improved logic"""
+        # 2. Find EIN (box b) - should be near employer info
         ein_patterns = [
-            r'\b([A-Z]{2,5}\d{7,10})\b',
-            r'\b(\d{2}-\d{7})\b',
-            r'\b([A-Z0-9]{10,12})\b'
+            r'b\s+Employer\s+identification\s+number[^\w]*([A-Z0-9]{10,12})',
+            r'EIN[:\s]*([A-Z0-9]{10,12})',
+            r'([A-Z]{2,4}\d{7,10})',  # General EIN pattern
         ]
         
         for pattern in ein_patterns:
-            matches = re.findall(pattern, text)
+            matches = re.findall(pattern, text, re.IGNORECASE)
             for match in matches:
-                if self.is_ein_format(match):
-                    return match
+                if len(match) >= 9 and match not in ['XX-XXXXXXX', '12-3456789']:
+                    extracted['employer_ein'] = match
+                    logger.info(f"✅ Found EIN: {match}")
+                    break
+            if 'employer_ein' in extracted:
+                break
         
-        return None
-
-    def extract_names(self, data: Dict) -> Dict[str, str]:
-        """Extract employee and employer names using context"""
-        names = {}
-        text_chunks = data['text_chunks']
-        lines = data['lines']
-        
-        # Common words to skip
-        skip_terms = {
-            'employee', 'employer', 'identification', 'number', 'address', 'code',
-            'wages', 'tips', 'compensation', 'federal', 'income', 'tax', 'withheld',
-            'social', 'security', 'medicare', 'statement', 'treasury', 'revenue',
-            'service', 'privacy', 'paperwork', 'reduction', 'notice', 'instructions',
-            'official', 'administration', 'department', 'form', 'copy', 'state',
-            'local', 'dependent', 'care', 'benefits', 'nonqualified', 'plans',
-            'statutory', 'retirement', 'third', 'party', 'sick', 'pay', 'control',
-            'first', 'middle', 'last', 'name', 'initial', 'suffix', 'street',
-            'city', 'zip', 'county', 'country', 'telephone', 'email'
-        }
-        
-        potential_names = []
-        for chunk, line_idx, line in text_chunks:
-            chunk_lower = chunk.lower()
-            # Filter out obvious non-names
-            if (not any(term in chunk_lower for term in skip_terms) and
-                not re.search(r'\d', chunk) and  # No numbers
-                len(chunk.split()) <= 4 and  # Not too long
-                len(chunk) >= 2):  # Not too short
-                
-                potential_names.append((chunk, line_idx, line))
-        
-        # Sort by position in document
-        potential_names.sort(key=lambda x: x[1])
-        
-        # Use heuristics to assign names
-        for i, (name, line_idx, line) in enumerate(potential_names):
-            line_lower = line.lower()
-            
-            # Employee name usually appears earlier and has certain context
-            if ('employee' not in names and 
-                (i < len(potential_names) // 2 or  # Earlier in document
-                 any(indicator in line_lower for indicator in ['employee', 'first', 'last']) or
-                 line_idx < 20)):  # Early line number
-                names['employee'] = name
-                logger.info(f"✅ Found employee name: {name} (line {line_idx + 1})")
-            
-            # Employer name often appears later or has company indicators
-            elif ('employer' not in names and 
-                  (any(indicator in line_lower for indicator in ['employer', 'company', 'corp', 'inc', 'llc']) or
-                   (i >= len(potential_names) // 2 and 'employee' in names))):
-                names['employer'] = name
-                logger.info(f"✅ Found employer name: {name} (line {line_idx + 1})")
-        
-        return names
-
-    def extract_wage_amounts(self, data: Dict) -> Dict[str, float]:
-        """Extract wage amounts using improved context matching"""
-        amounts = {}
-        numbers = data['numbers']
-        lines = data['lines']
-        
-        # Build context for each number
-        wage_candidates = []
-        for num, line_idx, line in numbers:
-            try:
-                amount = float(num)
-                # Filter for realistic amounts
-                if 0.01 <= amount <= 9999999:
-                    # Get surrounding context
-                    context_lines = []
-                    for i in range(max(0, line_idx-2), min(len(lines), line_idx+3)):
-                        context_lines.append(lines[i].lower())
-                    context = ' '.join(context_lines)
-                    
-                    wage_candidates.append((amount, line_idx, line, context))
-            except ValueError:
-                continue
-        
-        # Sort by amount for analysis
-        wage_candidates.sort(key=lambda x: x[0], reverse=True)
-        
-        logger.info(f"Processing {len(wage_candidates)} wage candidates")
-        
-        # Define field patterns with priorities
-        field_patterns = [
-            ('wages_tips_compensation', ['wages', 'tips', 'compensation', 'box 1', 'box1'], 1),
-            ('federal_income_tax_withheld', ['federal', 'income', 'tax', 'withheld', 'box 2', 'box2'], 2),
-            ('social_security_wages', ['social security', 'wages', 'box 3', 'box3'], 3),
-            ('social_security_tax_withheld', ['social security', 'tax', 'withheld', 'box 4', 'box4'], 4),
-            ('medicare_wages', ['medicare', 'wages', 'box 5', 'box5'], 5),
-            ('medicare_tax_withheld', ['medicare', 'tax', 'withheld', 'box 6', 'box6'], 6),
+        # 3. Find Employee Name (box e) - look for name patterns
+        name_patterns = [
+            r'e\s+Employee\'?s\s+first\s+name\s+and\s+initial.*?Last\s+name.*?([A-Z][A-Za-z]+).*?([A-Z][A-Za-z]+)',
+            r'first\s+name.*?([A-Z][A-Za-z]+).*?Last\s+name.*?([A-Z][A-Za-z]+)',
         ]
         
-        # First pass: look for exact matches
-        for field_name, keywords, box_num in field_patterns:
-            if field_name in amounts:
-                continue
-                
-            for amount, line_idx, line, context in wage_candidates:
-                # Check if this amount fits the pattern
-                keyword_matches = sum(1 for keyword in keywords if keyword in context)
-                
-                if keyword_matches >= 2:  # Need at least 2 keyword matches
-                    amounts[field_name] = amount
-                    logger.info(f"✅ Found {field_name}: ${amount:,.2f} (line {line_idx + 1})")
+        # Also look for names in structured areas
+        for i, line in enumerate(lines):
+            if 'first name' in line.lower() and 'last name' in line.lower():
+                # Look in next few lines for names
+                for j in range(i+1, min(i+4, len(lines))):
+                    potential_names = re.findall(r'\b([A-Z][A-Za-z]{1,})\b', lines[j])
+                    if len(potential_names) >= 2:
+                        extracted['employee_name'] = ' '.join(potential_names[:2])
+                        logger.info(f"✅ Found employee name: {extracted['employee_name']}")
+                        break
+                if 'employee_name' in extracted:
                     break
         
-        # Second pass: use amount heuristics if we have wages
-        if 'wages_tips_compensation' in amounts:
-            wages = amounts['wages_tips_compensation']
+        # If not found, look for standalone name patterns
+        if 'employee_name' not in extracted:
+            skip_words = {'VOID', 'Employee', 'Employer', 'Social', 'Security', 'Medicare', 'Federal', 'Tax', 'Wages', 'Tips', 'Income', 'Withheld'}
+            for line in lines:
+                names = re.findall(r'\b([A-Z][A-Za-z]{2,})\b', line)
+                valid_names = [name for name in names if name not in skip_words and len(name) > 2]
+                if len(valid_names) >= 1:
+                    extracted['employee_name'] = ' '.join(valid_names[:2]) if len(valid_names) > 1 else valid_names[0]
+                    logger.info(f"✅ Found employee name (fallback): {extracted['employee_name']}")
+                    break
+        
+        # 4. Find Employer Name (box c) - usually a company name
+        for line in lines:
+            if 'employer' in line.lower() and 'name' in line.lower():
+                # Look in next few lines
+                for j, next_line in enumerate(lines[lines.index(line)+1:lines.index(line)+4], 1):
+                    if re.match(r'^[A-Z][A-Za-z\s,\.]{5,}', next_line):
+                        extracted['employer_name'] = next_line.strip()
+                        logger.info(f"✅ Found employer name: {extracted['employer_name']}")
+                        break
+                if 'employer_name' in extracted:
+                    break
+        
+        # 5. Extract wage amounts using box-specific patterns
+        box_patterns = {
+            '1': (r'1\s+Wages,\s+tips,\s+other\s+compensation[^\d]*([0-9,]+(?:\.\d{2})?)', 'wages_tips_compensation'),
+            '2': (r'2\s+Federal\s+income\s+tax\s+withheld[^\d]*([0-9,]+(?:\.\d{2})?)', 'federal_income_tax_withheld'),
+            '3': (r'3\s+Social\s+security\s+wages[^\d]*([0-9,]+(?:\.\d{2})?)', 'social_security_wages'),
+            '4': (r'4\s+Social\s+security\s+tax\s+withheld[^\d]*([0-9,]+(?:\.\d{2})?)', 'social_security_tax_withheld'),
+            '5': (r'5\s+Medicare\s+wages\s+and\s+tips[^\d]*([0-9,]+(?:\.\d{2})?)', 'medicare_wages'),
+            '6': (r'6\s+Medicare\s+tax\s+withheld[^\d]*([0-9,]+(?:\.\d{2})?)', 'medicare_tax_withheld'),
+        }
+        
+        for box_num, (pattern, field_name) in box_patterns.items():
+            matches = re.findall(pattern, text, re.IGNORECASE | re.DOTALL)
+            if matches:
+                amount_str = matches[0].replace(',', '')
+                try:
+                    amount = float(amount_str)
+                    extracted[field_name] = amount
+                    logger.info(f"✅ Found {field_name} (Box {box_num}): ${amount:,.2f}")
+                except ValueError:
+                    pass
+        
+        # 6. Fallback: look for numbers in structured positions
+        if not any(key.endswith('_compensation') or key.endswith('_withheld') or key.endswith('_wages') for key in extracted.keys()):
+            logger.info("🔄 Using fallback number extraction...")
             
-            # Look for tax amounts that make sense relative to wages
-            for amount, line_idx, line, context in wage_candidates:
-                if amount >= wages:  # Skip amounts larger than wages
+            # Extract all numbers and their context
+            number_contexts = []
+            for i, line in enumerate(lines):
+                numbers = re.findall(r'\b(\d{1,6}(?:\.\d{2})?)\b', line)
+                for num in numbers:
+                    try:
+                        amount = float(num)
+                        if 1 <= amount <= 999999:  # Reasonable wage range
+                            context = ' '.join(lines[max(0, i-1):i+2]).lower()
+                            number_contexts.append((amount, i, line, context))
+                    except ValueError:
+                        pass
+            
+            # Sort by amount (largest first for wages)
+            number_contexts.sort(key=lambda x: x[0], reverse=True)
+            
+            logger.info(f"Found {len(number_contexts)} potential amounts:")
+            for amount, line_idx, line, context in number_contexts[:10]:
+                logger.info(f"  ${amount:,.2f} - Line {line_idx+1}: {line}")
+            
+            # Smart assignment based on W2 structure
+            field_assignments = [
+                ('wages_tips_compensation', ['wages', 'compensation', 'tips'], True),  # Largest amount
+                ('federal_income_tax_withheld', ['federal', 'tax', 'withheld'], False),
+                ('social_security_wages', ['social', 'security', 'wages'], False),
+                ('social_security_tax_withheld', ['social', 'security', 'tax'], False),
+                ('medicare_wages', ['medicare', 'wages'], False),
+                ('medicare_tax_withheld', ['medicare', 'tax'], False),
+            ]
+            
+            used_amounts = set()
+            
+            for field_name, keywords, prefer_largest in field_assignments:
+                if field_name in extracted:
                     continue
+                
+                candidates = []
+                for amount, line_idx, line, context in number_contexts:
+                    if amount in used_amounts:
+                        continue
                     
-                # Federal tax is typically 10-30% of wages
-                if ('federal_income_tax_withheld' not in amounts and 
-                    0.05 * wages <= amount <= 0.35 * wages and
-                    ('federal' in context or 'tax' in context)):
-                    amounts['federal_income_tax_withheld'] = amount
-                    logger.info(f"✅ Found federal tax (heuristic): ${amount:,.2f}")
+                    # Score based on keyword matches
+                    score = sum(1 for keyword in keywords if keyword in context)
+                    if score > 0:
+                        candidates.append((score, amount, line_idx, line))
                 
-                # Social Security tax is 6.2% of wages (up to wage base)
-                ss_expected = min(wages, 160200) * 0.062  # 2023 wage base
-                if ('social_security_tax_withheld' not in amounts and
-                    abs(amount - ss_expected) / ss_expected < 0.1 and  # Within 10%
-                    ('social' in context or 'security' in context)):
-                    amounts['social_security_tax_withheld'] = amount
-                    logger.info(f"✅ Found SS tax (heuristic): ${amount:,.2f}")
-                
-                # Medicare tax is 1.45% of wages
-                medicare_expected = wages * 0.0145
-                if ('medicare_tax_withheld' not in amounts and
-                    abs(amount - medicare_expected) / medicare_expected < 0.1 and
-                    'medicare' in context):
-                    amounts['medicare_tax_withheld'] = amount
-                    logger.info(f"✅ Found Medicare tax (heuristic): ${amount:,.2f}")
+                if candidates:
+                    # Sort by score, then by amount preference
+                    candidates.sort(key=lambda x: (x[0], x[1] if prefer_largest else -x[1]), reverse=True)
+                    amount = candidates[0][1]
+                    extracted[field_name] = amount
+                    used_amounts.add(amount)
+                    logger.info(f"✅ Found {field_name} (fallback): ${amount:,.2f}")
+                elif prefer_largest and number_contexts:
+                    # For wages, use largest unused amount
+                    for amount, line_idx, line, context in number_contexts:
+                        if amount not in used_amounts:
+                            extracted[field_name] = amount
+                            used_amounts.add(amount)
+                            logger.info(f"✅ Found {field_name} (largest): ${amount:,.2f}")
+                            break
         
-        # Third pass: assign remaining large amounts as wages if not found
-        if 'wages_tips_compensation' not in amounts:
-            # Look for the largest reasonable amount
-            for amount, line_idx, line, context in wage_candidates:
-                if amount >= 1000:  # Minimum reasonable wage
-                    amounts['wages_tips_compensation'] = amount
-                    logger.info(f"✅ Found wages (largest amount): ${amount:,.2f}")
-                    break
-        
-        return amounts
-
-    def extract_tax_year(self, text: str) -> Optional[int]:
-        """Extract tax year"""
-        current_year = 2024  # Update as needed
+        # 7. Extract tax year
         year_matches = re.findall(r'\b(20\d{2})\b', text)
-        
         if year_matches:
-            years = [int(y) for y in year_matches if 2020 <= int(y) <= current_year + 1]
+            years = [int(y) for y in year_matches if 2020 <= int(y) <= 2025]
             if years:
-                # Return the most recent valid year
-                year = max(years)
-                logger.info(f"✅ Found tax year: {year}")
-                return year
-        
-        return None
-
-    def smart_field_extraction(self, text: str) -> Dict[str, Any]:
-        """Extract W2 fields using improved smart pattern matching"""
-        extracted = {}
-        
-        # Get all data
-        data = self.extract_all_numbers_and_text(text)
-        logger.info(f"Found {len(data['numbers'])} numbers and {len(data['text_chunks'])} text chunks")
-        
-        # Extract SSN
-        ssn = self.extract_ssn(text)
-        if ssn:
-            extracted['employee_ssn'] = ssn
-        
-        # Extract EIN
-        ein = self.extract_ein(text)
-        if ein:
-            extracted['employer_ein'] = ein
-        
-        # Extract names
-        names = self.extract_names(data)
-        if 'employee' in names:
-            extracted['employee_name'] = names['employee']
-        if 'employer' in names:
-            extracted['employer_name'] = names['employer']
-        
-        # Extract wage amounts
-        amounts = self.extract_wage_amounts(data)
-        extracted.update(amounts)
-        
-        # Extract tax year
-        year = self.extract_tax_year(text)
-        if year:
-            extracted['tax_year'] = year
+                extracted['tax_year'] = max(years)
+                logger.info(f"✅ Found tax year: {extracted['tax_year']}")
         
         return extracted
 
+    def smart_field_extraction(self, text: str) -> Dict[str, Any]:
+        """Main extraction method using structured parsing"""
+        return self.parse_w2_structured_text(text)
+
     def process_document(self, file_path: str) -> Dict[str, Any]:
-        """Process document with improved extraction"""
+        """Process document with structured W2 extraction"""
         try:
             file_ext = os.path.splitext(file_path)[1].lower()
-            logger.info(f"Processing {file_ext} document")
+            logger.info(f"Processing {file_ext} document with structured W2 extraction")
 
             if file_ext in ['.jpg', '.jpeg', '.png', '.tiff', '.bmp']:
                 text, confidence = self.extract_text_from_image(file_path)
@@ -383,40 +293,41 @@ class W2Extractor:
                 best_confidence = confidence
                 
             elif file_ext == '.pdf':
-                # Process all pages and combine results
+                # Focus on the W2 page (usually page 2)
                 all_extracted = {}
                 best_confidence = 0.0
                 all_text = ""
                 
-                for page_num in range(min(3, 10)):  # First 3 pages
+                # Try multiple pages, but prioritize page 2 for W2 forms
+                page_priorities = [1, 0, 2]  # Page 2 first, then 1, then 3
+                
+                for page_num in page_priorities:
                     try:
                         text, confidence = self.extract_text_from_pdf_page(file_path, page_num)
                         
                         if not text or len(text.strip()) < 50:
                             continue
                         
-                        all_text += text + "\n"
-                        logger.info(f"\n=== PROCESSING PAGE {page_num + 1} ===")
-                        page_extracted = self.smart_field_extraction(text)
+                        # Check if this page contains W2 structure
+                        w2_indicators = ['wage and tax statement', 'w-2', 'social security number', 'employer identification']
+                        has_w2_structure = any(indicator in text.lower() for indicator in w2_indicators)
                         
-                        # Merge results, preferring non-empty values
-                        for key, value in page_extracted.items():
-                            if key not in all_extracted or not all_extracted[key]:
-                                all_extracted[key] = value
-                        
-                        best_confidence = max(best_confidence, confidence)
+                        if has_w2_structure or page_num == 1:  # Always try page 2, or if W2 indicators found
+                            logger.info(f"\n=== PROCESSING PAGE {page_num + 1} (W2 Structure: {has_w2_structure}) ===")
+                            page_extracted = self.smart_field_extraction(text)
+                            
+                            # Prefer results from pages with W2 structure
+                            if has_w2_structure or not all_extracted:
+                                for key, value in page_extracted.items():
+                                    if key not in all_extracted or not all_extracted[key] or has_w2_structure:
+                                        all_extracted[key] = value
+                            
+                            best_confidence = max(best_confidence, confidence)
+                            all_text += text + "\n"
                         
                     except Exception as e:
                         logger.warning(f"Error processing page {page_num + 1}: {e}")
                         continue
-                
-                # Also try processing all text together for better context
-                if all_text:
-                    combined_extracted = self.smart_field_extraction(all_text)
-                    # Fill in any missing fields
-                    for key, value in combined_extracted.items():
-                        if key not in all_extracted or not all_extracted[key]:
-                            all_extracted[key] = value
                 
                 extracted_fields = all_extracted
                 
@@ -428,20 +339,22 @@ class W2Extractor:
                 }
 
             # Determine if this is a valid W2
-            w2_indicators = ['w-2', 'wage and tax statement', 'form w-2', 'employer identification']
+            w2_indicators = ['w-2', 'wage and tax statement', 'form w-2', 'employer identification', 'social security number']
             has_structure = any(indicator in text.lower() for indicator in w2_indicators)
             has_key_fields = any(key in extracted_fields for key in ['employee_ssn', 'employer_ein', 'wages_tips_compensation'])
-            has_minimum_data = len(extracted_fields) >= 2
+            has_minimum_data = len(extracted_fields) >= 3
             
             is_w2 = has_structure or (has_key_fields and has_minimum_data)
 
-            logger.info(f"🏁 IMPROVED W2 EXTRACTION RESULTS:")
+            logger.info(f"🏁 STRUCTURED W2 EXTRACTION RESULTS:")
             logger.info(f"   Is W2: {is_w2}")
             logger.info(f"   Has structure: {has_structure}")
             logger.info(f"   Has key fields: {has_key_fields}")
             logger.info(f"   Fields found: {len(extracted_fields)}")
             logger.info(f"   Confidence: {best_confidence:.2f}")
-            logger.info(f"   Extracted fields: {extracted_fields}")
+            logger.info(f"   Final extracted fields:")
+            for key, value in extracted_fields.items():
+                logger.info(f"     {key}: {value}")
 
             return {
                 'is_w2': is_w2,
