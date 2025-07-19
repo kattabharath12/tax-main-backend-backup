@@ -14,34 +14,81 @@ logger = logging.getLogger(__name__)
 
 class W2Extractor:
     def __init__(self):
-        pass
+        # Generic patterns that work for any W2
+        self.w2_patterns = {
+            'employee_ssn': [
+                r'(?i)(?:employee.*?social security number|ssn)[\s\n:]*(\d{3}-\d{2}-\d{4})',
+                r'(?i)(?:employee.*?social security number|ssn)[\s\n:]*(\d{9})',
+                r'(\d{3}-\d{2}-\d{4})',  # Standard SSN format
+                r'\b(\d{9})\b',  # 9-digit SSN without hyphens
+            ],
+            'employer_ein': [
+                r'(?i)(?:employer identification number|ein)[\s\n:]*(\d{2}-\d{7})',
+                r'(?i)(?:employer identification number|ein)[\s\n:]*([A-Z0-9]{9,11})',
+                r'(\d{2}-\d{7})',  # Standard EIN format
+                r'\b([A-Z]{2,5}\d{7,10})\b',  # Alternative EIN format
+            ],
+            'employer_name': [
+                r'(?i)employer.*?name.*?address[\s\n:]*([A-Z][A-Za-z\s,\.&\-\'Inc]{2,50})(?=\s*\n|\s*\d)',
+                r'(?i)(?:company|corp|corporation|inc|llc)[\s\n]*([A-Z][A-Za-z\s,\.&\-\']{2,50})',
+                r'([A-Z][A-Za-z\s&,\.]{2,40}(?:\s+(?:Inc|Corp|LLC|Company|Co)\.?))',
+            ],
+            'employee_name': [
+                r'(?i)employee.*?name.*?address[\s\n:]*([A-Z][A-Za-z\s\-\'\.]{2,50})(?=\s*\n|\s*\d)',
+                r'([A-Z][a-z]+\s+[A-Z][a-z]+)',  # First Last name pattern
+            ],
+            'employee_address': [
+                r'(?i)employee.*?name.*?address[\s\n:]*[A-Za-z\s]+\n([0-9][0-9A-Za-z\s,\.\-]{10,100})',
+            ],
+            'employer_address': [
+                r'(?i)employer.*?name.*?address[\s\n:]*[A-Za-z\s]+\n([0-9][0-9A-Za-z\s,\.\-]{10,100})',
+            ],
+            # Wage and tax patterns - look for actual amounts
+            'wages_tips_compensation': [
+                r'(?i)(?:1\.?\s*wages.*?compensation|box\s*1.*?wages|wages.*?tips.*?compensation)[\s\n:$]*([0-9,]+(?:\.\d{2})?)',
+                r'(?i)wages.*?tips.*?other.*?compensation[\s\n:$]*([0-9,]+(?:\.\d{2})?)',
+                r'\$?([1-9]\d{4,6}(?:,\d{3})*(?:\.\d{2})?)',  # Large amounts (wages)
+            ],
+            'federal_income_tax_withheld': [
+                r'(?i)(?:2\.?\s*federal.*?tax.*?withheld|box\s*2.*?federal|federal.*?income.*?tax.*?withheld)[\s\n:$]*([0-9,]+(?:\.\d{2})?)',
+                r'(?i)federal.*?income.*?tax.*?withheld[\s\n:$]*([0-9,]+(?:\.\d{2})?)',
+            ],
+            'social_security_wages': [
+                r'(?i)(?:3\.?\s*social.*?security.*?wages|box\s*3.*?social|social.*?security.*?wages)[\s\n:$]*([0-9,]+(?:\.\d{2})?)',
+                r'(?i)social.*?security.*?wages[\s\n:$]*([0-9,]+(?:\.\d{2})?)',
+            ],
+            'social_security_tax_withheld': [
+                r'(?i)(?:4\.?\s*social.*?security.*?tax.*?withheld|box\s*4.*?social|social.*?security.*?tax.*?withheld)[\s\n:$]*([0-9,]+(?:\.\d{2})?)',
+                r'(?i)social.*?security.*?tax.*?withheld[\s\n:$]*([0-9,]+(?:\.\d{2})?)',
+            ],
+            'medicare_wages': [
+                r'(?i)(?:5\.?\s*medicare.*?wages|box\s*5.*?medicare|medicare.*?wages.*?tips)[\s\n:$]*([0-9,]+(?:\.\d{2})?)',
+                r'(?i)medicare.*?wages.*?tips[\s\n:$]*([0-9,]+(?:\.\d{2})?)',
+            ],
+            'medicare_tax_withheld': [
+                r'(?i)(?:6\.?\s*medicare.*?tax.*?withheld|box\s*6.*?medicare|medicare.*?tax.*?withheld)[\s\n:$]*([0-9,]+(?:\.\d{2})?)',
+                r'(?i)medicare.*?tax.*?withheld[\s\n:$]*([0-9,]+(?:\.\d{2})?)',
+            ],
+        }
 
     def extract_text_from_pdf_page(self, pdf_path: str, page_num: int) -> Tuple[str, float]:
-        """Extract text from specific PDF page with better error handling"""
+        """Extract text from specific PDF page"""
         try:
-            # Use pdfplumber with error handling for metadata issues
             with pdfplumber.open(pdf_path) as pdf:
                 if page_num < len(pdf.pages):
                     page = pdf.pages[page_num]
-                    try:
-                        text = page.extract_text()
-                        if text and len(text.strip()) > 50:
-                            logger.info(f"Page {page_num + 1} extracted {len(text)} characters via pdfplumber")
-                            return text, 0.9
-                    except Exception as extract_error:
-                        logger.warning(f"pdfplumber extraction failed for page {page_num + 1}: {extract_error}")
+                    text = page.extract_text()
+                    if text and len(text.strip()) > 50:
+                        logger.info(f"Page {page_num + 1} extracted {len(text)} characters")
+                        return text, 0.9
             
-            # Always try OCR as fallback for better results
-            logger.info(f"Using OCR for page {page_num + 1}")
+            # Fallback to OCR
             with tempfile.TemporaryDirectory() as temp_dir:
-                try:
-                    images = convert_from_path(pdf_path, first_page=page_num+1, last_page=page_num+1, dpi=300)
-                    if images:
-                        temp_image_path = os.path.join(temp_dir, f"page_{page_num}.png")
-                        images[0].save(temp_image_path, 'PNG')
-                        return self.extract_text_from_image(temp_image_path)
-                except Exception as ocr_error:
-                    logger.error(f"OCR failed for page {page_num + 1}: {ocr_error}")
+                images = convert_from_path(pdf_path, first_page=page_num+1, last_page=page_num+1, dpi=300)
+                if images:
+                    temp_image_path = os.path.join(temp_dir, f"page_{page_num}.png")
+                    images[0].save(temp_image_path, 'PNG')
+                    return self.extract_text_from_image(temp_image_path)
                     
         except Exception as e:
             logger.error(f"Error extracting from page {page_num}: {e}")
@@ -49,38 +96,19 @@ class W2Extractor:
         return "", 0.0
 
     def extract_text_from_image(self, image_path: str) -> Tuple[str, float]:
-        """Extract text from image with enhanced preprocessing"""
+        """Extract text from image"""
         try:
-            # Load and preprocess image
             img = cv2.imread(image_path)
             if img is None:
-                logger.error(f"Could not load image: {image_path}")
                 return "", 0.0
                 
-            # Convert to grayscale
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             
-            # Apply multiple preprocessing techniques
-            # 1. Gaussian blur to reduce noise
-            blurred = cv2.GaussianBlur(gray, (1, 1), 0)
-            
-            # 2. Adaptive threshold for better text detection
-            thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-            
-            # 3. Morphological operations to clean up
-            kernel = np.ones((1, 1), np.uint8)
-            cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
-            
-            # Save preprocessed image
             temp_path = image_path.replace('.', '_processed.')
-            cv2.imwrite(temp_path, cleaned)
+            cv2.imwrite(temp_path, thresh)
             
-            # Try multiple OCR configurations
-            configs = [
-                '--oem 3 --psm 6',  # Uniform block of text
-                '--oem 3 --psm 4',  # Single column of text
-                '--oem 3 --psm 3',  # Fully automatic page segmentation
-            ]
+            configs = ['--oem 3 --psm 6', '--oem 3 --psm 4', '--oem 3 --psm 3']
             
             best_text = ""
             best_confidence = 0.0
@@ -90,7 +118,6 @@ class W2Extractor:
                     text = pytesseract.image_to_string(temp_path, config=config)
                     data = pytesseract.image_to_data(temp_path, config=config, output_type=pytesseract.Output.DICT)
                     
-                    # Calculate confidence
                     confidences = [int(conf) for conf in data['conf'] if int(conf) > 0]
                     avg_confidence = sum(confidences) / len(confidences) if confidences else 0
                     
@@ -98,171 +125,153 @@ class W2Extractor:
                         best_text = text
                         best_confidence = avg_confidence
                         
-                except Exception as e:
-                    logger.warning(f"OCR config {config} failed: {e}")
+                except Exception:
                     continue
             
-            # Cleanup
             if os.path.exists(temp_path):
                 os.remove(temp_path)
                 
-            logger.info(f"OCR completed with {best_confidence:.1f}% confidence, {len(best_text)} characters")
             return best_text, best_confidence / 100.0
             
         except Exception as e:
-            logger.error(f"OCR processing error: {e}")
+            logger.error(f"OCR error: {e}")
             return "", 0.0
 
-    def extract_w2_data_from_text(self, text: str, page_num: int) -> Dict[str, Any]:
-        """Extract W2 data with detailed logging"""
-        extracted = {}
-        
-        logger.info(f"=== EXTRACTING FROM PAGE {page_num} ===")
-        logger.info(f"Text length: {len(text)} characters")
-        
-        # Clean and normalize text
-        lines = [line.strip() for line in text.split('\n') if line.strip()]
-        logger.info(f"Non-empty lines: {len(lines)}")
-        
-        # Log first few lines for debugging
-        logger.info("First 5 lines:")
-        for i, line in enumerate(lines[:5]):
-            logger.info(f"  {i+1}: {repr(line)}")
-        
-        # Join all text for pattern matching
-        full_text = ' '.join(lines)
-        full_text_upper = full_text.upper()
-        
-        # Extract Employee SSN - look for the actual SSN from your PDF: 4564564567
-        ssn_patterns = [
-            r'\b4564564567\b',  # Exact match
-            r'\b(\d{10})\b',    # Any 10-digit number
-        ]
-        
-        for pattern in ssn_patterns:
-            matches = re.findall(pattern, full_text)
-            if matches:
-                ssn_raw = matches[0]
-                if len(ssn_raw) == 10:
-                    formatted_ssn = f"{ssn_raw[:3]}-{ssn_raw[3:5]}-{ssn_raw[5:]}"
-                    extracted['employee_ssn'] = formatted_ssn
-                    logger.info(f"✅ Found SSN: {formatted_ssn}")
-                    break
-        
-        # Extract Employer EIN - look for: FGHU7896901
-        ein_patterns = [
-            r'\bFGHU7896901\b',           # Exact match
-            r'\b([A-Z]{2,5}\d{7,10})\b', # Pattern match
-        ]
-        
-        for pattern in ein_patterns:
-            matches = re.findall(pattern, full_text_upper)
-            if matches:
-                extracted['employer_ein'] = matches[0]
-                logger.info(f"✅ Found EIN: {matches[0]}")
-                break
-        
-        # Extract Employee Name - look for: SAI KUMAR POTURI
-        if 'SAI KUMAR' in full_text_upper:
-            if 'POTURI' in full_text_upper:
-                extracted['employee_name'] = 'SAI KUMAR POTURI'
-                logger.info("✅ Found employee name: SAI KUMAR POTURI")
+    def clean_amount(self, amount_str: str) -> Optional[float]:
+        """Clean and convert amount strings to float"""
+        try:
+            # Remove $ signs, commas, and extra spaces
+            cleaned = re.sub(r'[\$,\s]', '', amount_str)
+            # Handle decimal points
+            if '.' in cleaned:
+                return float(cleaned)
             else:
-                extracted['employee_name'] = 'SAI KUMAR'
-                logger.info("✅ Found employee name: SAI KUMAR")
+                # If no decimal, assume it's in dollars
+                return float(cleaned)
+        except (ValueError, TypeError):
+            return None
+
+    def extract_w2_fields(self, text: str) -> Dict[str, Any]:
+        """Extract W2 fields using generic patterns"""
+        extracted_fields = {}
         
-        # Extract Employer Name - look for: AJITH
-        if 'AJITH' in full_text_upper:
-            extracted['employer_name'] = 'AJITH'
-            logger.info("✅ Found employer name: AJITH")
+        # Normalize text for better matching
+        text_normalized = re.sub(r'\s+', ' ', text)
         
-        # Extract numeric values - target specific amounts
-        target_amounts = {
-            30000: 'wages_tips_compensation',
-            350: 'federal_income_tax_withheld',
-            200: 'social_security_wages', 
-            345: 'social_security_tax_withheld',
-            500: 'medicare_wages',
-            540: 'medicare_tax_withheld'
-        }
+        logger.info(f"Extracting from text length: {len(text_normalized)}")
         
-        # Find all numbers in the text
-        all_numbers = re.findall(r'\b(\d+)\b', full_text)
-        numeric_values = []
-        for num_str in all_numbers:
-            try:
-                num = int(num_str)
-                if 50 <= num <= 100000:  # Reasonable range for tax amounts
-                    numeric_values.append(num)
-            except ValueError:
-                continue
+        # Show first few lines for debugging
+        lines = text_normalized.split('\n')[:10]
+        logger.info(f"First lines: {lines}")
         
-        logger.info(f"Numbers found in reasonable range: {numeric_values}")
-        
-        # Match numbers to fields
-        for number in numeric_values:
-            if number in target_amounts:
-                field_name = target_amounts[number]
-                extracted[field_name] = float(number)
-                logger.info(f"✅ Matched {number} to {field_name}")
-        
+        for field_name, patterns in self.w2_patterns.items():
+            found_value = None
+            
+            for pattern in patterns:
+                try:
+                    matches = re.findall(pattern, text_normalized, re.IGNORECASE | re.MULTILINE)
+                    
+                    if matches:
+                        value = matches[0].strip()
+                        
+                        if not value or len(value) < 1:
+                            continue
+                        
+                        # Handle numeric fields (wages, taxes)
+                        if field_name in ['wages_tips_compensation', 'federal_income_tax_withheld', 
+                                        'social_security_wages', 'social_security_tax_withheld',
+                                        'medicare_wages', 'medicare_tax_withheld']:
+                            
+                            amount = self.clean_amount(value)
+                            if amount is not None and 0 < amount <= 1000000:
+                                found_value = amount
+                                logger.info(f"✅ Found {field_name}: ${amount:,.2f}")
+                                break
+                        
+                        # Handle SSN formatting
+                        elif field_name == 'employee_ssn':
+                            ssn_clean = re.sub(r'[^\d]', '', value)
+                            if len(ssn_clean) == 9:
+                                formatted_ssn = f"{ssn_clean[:3]}-{ssn_clean[3:5]}-{ssn_clean[5:]}"
+                                found_value = formatted_ssn
+                                logger.info(f"✅ Found {field_name}: {formatted_ssn}")
+                                break
+                        
+                        # Handle EIN formatting
+                        elif field_name == 'employer_ein':
+                            if re.match(r'\d{2}-\d{7}', value):
+                                found_value = value
+                            else:
+                                ein_clean = re.sub(r'[^\dA-Z]', '', value)
+                                if len(ein_clean) >= 9:
+                                    found_value = ein_clean
+                            logger.info(f"✅ Found {field_name}: {found_value}")
+                            break
+                        
+                        # Handle text fields (names, addresses)
+                        else:
+                            # Clean up text fields
+                            cleaned_value = re.sub(r'[^\w\s\-\.,&\']', '', value)
+                            if len(cleaned_value) >= 2:
+                                found_value = cleaned_value.strip()
+                                logger.info(f"✅ Found {field_name}: {found_value}")
+                                break
+                                
+                except Exception as e:
+                    logger.warning(f"Pattern error for {field_name}: {e}")
+                    continue
+            
+            if found_value is not None:
+                extracted_fields[field_name] = found_value
+
         # Extract tax year
-        years = re.findall(r'\b(20\d{2})\b', full_text)
-        if years:
-            extracted['tax_year'] = int(years[0])
-            logger.info(f"✅ Found tax year: {years[0]}")
-        
-        logger.info(f"=== EXTRACTION COMPLETE ===")
-        logger.info(f"Total fields extracted: {len(extracted)}")
-        logger.info(f"Fields: {list(extracted.keys())}")
-        
-        return extracted
+        year_match = re.search(r'\b(20\d{2})\b', text_normalized)
+        if year_match:
+            extracted_fields['tax_year'] = int(year_match.group(1))
+            logger.info(f"✅ Found tax_year: {year_match.group(1)}")
+
+        logger.info(f"Total fields extracted: {len(extracted_fields)}")
+        return extracted_fields
+
+    def is_w2_document(self, text: str) -> bool:
+        """Check if document appears to be a W2"""
+        text_lower = text.lower()
+        w2_indicators = [
+            'w-2', 'wage and tax statement', 'social security', 'medicare', 
+            'federal income tax', 'employer identification number'
+        ]
+        return any(indicator in text_lower for indicator in w2_indicators)
 
     def process_document(self, file_path: str) -> Dict[str, Any]:
-        """Process document focusing on page 2 where actual W2 data is"""
+        """Process document with generic W2 extraction"""
         try:
             file_ext = os.path.splitext(file_path)[1].lower()
             logger.info(f"Processing {file_ext} document: {file_path}")
 
+            all_text = ""
+            best_confidence = 0.0
+            
             if file_ext in ['.jpg', '.jpeg', '.png', '.tiff', '.bmp']:
                 text, confidence = self.extract_text_from_image(file_path)
-                extracted_data = self.extract_w2_data_from_text(text, 1)
-                best_page = 1
+                all_text = text
                 best_confidence = confidence
                 
             elif file_ext == '.pdf':
-                best_data = {}
-                best_confidence = 0.0
-                best_page = 2  # Default to page 2
+                # Try all pages and combine text
+                combined_text = ""
+                total_confidence = 0
+                page_count = 0
                 
-                # Focus on page 2 (index 1) where the actual W2 data should be
-                logger.info("🎯 FOCUSING ON PAGE 2 - WHERE W2 DATA SHOULD BE")
-                text, confidence = self.extract_text_from_pdf_page(file_path, 1)  # Page 2 (0-indexed)
+                for page_num in range(3):  # Check first 3 pages
+                    text, confidence = self.extract_text_from_pdf_page(file_path, page_num)
+                    if text and len(text.strip()) > 20:
+                        combined_text += text + "\n"
+                        total_confidence += confidence
+                        page_count += 1
+                        logger.info(f"Added page {page_num + 1} to combined text")
                 
-                if text and len(text.strip()) > 50:
-                    extracted_data = self.extract_w2_data_from_text(text, 2)
-                    
-                    if len(extracted_data) > 0:
-                        best_data = extracted_data
-                        best_confidence = confidence
-                        best_page = 2
-                        logger.info(f"✅ Page 2 has {len(extracted_data)} fields - using this page")
-                    else:
-                        logger.warning("❌ Page 2 has no extracted data")
-                
-                # If page 2 failed, try page 3 as backup
-                if len(best_data) == 0:
-                    logger.info("🔄 Page 2 failed, trying page 3 as backup")
-                    text, confidence = self.extract_text_from_pdf_page(file_path, 2)  # Page 3 (0-indexed)
-                    
-                    if text and len(text.strip()) > 50:
-                        extracted_data = self.extract_w2_data_from_text(text, 3)
-                        if len(extracted_data) > len(best_data):
-                            best_data = extracted_data
-                            best_confidence = confidence
-                            best_page = 3
-                
-                extracted_data = best_data
+                all_text = combined_text
+                best_confidence = total_confidence / page_count if page_count > 0 else 0.0
                 
             else:
                 return {
@@ -271,27 +280,46 @@ class W2Extractor:
                     'confidence': 0.0
                 }
 
-            # Determine if this is a valid W2
-            is_w2 = len(extracted_data) > 1 or 'tax_year' in extracted_data
+            if not all_text or len(all_text.strip()) < 50:
+                return {
+                    'is_w2': False,
+                    'error': 'No text could be extracted from document',
+                    'confidence': 0.0,
+                    'raw_text': '',
+                    'extracted_fields': {}
+                }
+
+            # Check if this looks like a W2
+            is_w2 = self.is_w2_document(all_text)
             
+            if not is_w2:
+                return {
+                    'is_w2': False,
+                    'error': 'Document does not appear to be a W2 form',
+                    'confidence': best_confidence,
+                    'raw_text': all_text[:500],
+                    'extracted_fields': {}
+                }
+
+            # Extract W2 fields
+            extracted_fields = self.extract_w2_fields(all_text)
+
             logger.info(f"🏁 FINAL RESULT:")
             logger.info(f"   Is W2: {is_w2}")
-            logger.info(f"   Best Page: {best_page}")
             logger.info(f"   Confidence: {best_confidence:.1%}")
-            logger.info(f"   Fields Extracted: {len(extracted_data)}")
-            logger.info(f"   Data: {extracted_data}")
+            logger.info(f"   Fields Extracted: {len(extracted_fields)}")
+            logger.info(f"   Data: {extracted_fields}")
 
             return {
                 'is_w2': is_w2,
                 'confidence': best_confidence,
-                'raw_text': f"Processed page {best_page}",
-                'extracted_fields': extracted_data,
-                'error': None,
-                'page_processed': best_page
+                'raw_text': all_text[:500],  # First 500 chars
+                'extracted_fields': extracted_fields,
+                'error': None
             }
 
         except Exception as e:
-            logger.error(f"❌ Error processing document: {e}")
+            logger.error(f"Error processing document: {e}")
             import traceback
             traceback.print_exc()
             return {
